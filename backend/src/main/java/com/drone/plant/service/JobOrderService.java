@@ -176,23 +176,35 @@ public class JobOrderService {
         return reload(saved.getId());
     }
 
-    /** 作业中 → 已完成：以飞行日志累计亩数为准收口，地块与无人机回库 */
+    /**
+     * 作业中 → 已完成：实际亩数只认该作业单已落库飞行日志的累计亩数。
+     * 汇总为零拒绝完成；请求若携带实际亩数且与汇总不一致同样拒绝。
+     * 状态机保证重复提交不再流转，统计不会被二次改变。
+     */
     @Transactional
     public Views.JobOrderView done(Long id, JobOrderDtos.DoneReq req) {
         JobOrder order = requireOrder(id);
         requireFlow(order, "DONE");
-        BigDecimal logged = loggedArea(order.getId());
-        BigDecimal actualMu = req == null || req.getActualMu() == null ? logged : req.getActualMu();
-        if (actualMu.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BizException("实际作业亩数必须大于 0，当前还没有登记有效的飞行日志");
+        BigDecimal logged = loggedArea(order.getId()).setScale(2, RoundingMode.HALF_UP);
+        if (logged.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BizException("作业单 " + order.getOrderNo()
+                    + " 还没有登记有效的飞行日志，日志累计亩数为 0，不能完成；请先登记架次再收口");
+        }
+        if (req != null && req.getActualMu() != null) {
+            BigDecimal submitted = nvl(req.getActualMu()).setScale(2, RoundingMode.HALF_UP);
+            if (submitted.compareTo(logged) != 0) {
+                throw new BizException("实际作业亩数只能取该作业单已落库飞行日志的累计亩数，不能手工填写："
+                        + "请求提交 " + submitted + " 亩，飞行日志汇总 " + logged
+                        + " 亩，两者不一致，请以日志汇总 " + logged + " 亩为准");
+            }
         }
         BigDecimal ceiling = nvl(order.getPlannedMu()).multiply(PlantRules.ACTUAL_TOLERANCE);
-        if (actualMu.compareTo(ceiling) > 0) {
-            throw new BizException("实际作业亩数不能超过计划亩数的 1.2 倍（上限 " + ceiling.setScale(2, RoundingMode.HALF_UP)
-                    + " 亩），收到的是 " + actualMu);
+        if (logged.compareTo(ceiling) > 0) {
+            throw new BizException("飞行日志累计亩数不能超过计划亩数的 1.2 倍（上限 "
+                    + ceiling.setScale(2, RoundingMode.HALF_UP) + " 亩），当前日志汇总为 " + logged + " 亩");
         }
         order.setStatus("DONE");
-        order.setActualMu(actualMu.setScale(2, RoundingMode.HALF_UP));
+        order.setActualMu(logged);
         order.setFinishedAt(LocalDateTime.now());
         order.setUpdatedAt(LocalDateTime.now());
         JobOrder saved = jobOrderRepository.save(order);
@@ -451,6 +463,8 @@ public class JobOrderService {
     private Views.JobOrderView toView(JobOrderRow row, NameBook book) {
         BigDecimal planned = nvl(row.getPlannedMu());
         BigDecimal actual = nvl(row.getActualMu());
+        BigDecimal logged = book.loggedMu.getOrDefault(row.getId(), BigDecimal.ZERO)
+                .setScale(2, RoundingMode.HALF_UP);
         int progress = planned.compareTo(BigDecimal.ZERO) <= 0
                 ? 0
                 : actual.multiply(BigDecimal.valueOf(100)).divide(planned, 0, RoundingMode.HALF_UP).intValue();
@@ -462,7 +476,7 @@ public class JobOrderService {
                 book.bodyNo.get(row.getDroneId()), book.model.get(row.getDroneId()),
                 droneStatus, PlantRules.droneStatusName(droneStatus),
                 book.openHandlingDrones.contains(row.getDroneId()), row.getPilotId(),
-                book.pilotName.get(row.getPilotId()), row.getFormula(), row.getDosePerMu(), planned, actual,
+                book.pilotName.get(row.getPilotId()), row.getFormula(), row.getDosePerMu(), planned, actual, logged,
                 row.getJobDate(), row.getWeather(), row.getStatus(),
                 PlantRules.orderStatusName(row.getStatus()), Math.min(progress, 100),
                 book.sortCount.getOrDefault(row.getId(), 0L).intValue(), chemical, row.getFinishedAt(),
@@ -492,10 +506,12 @@ public class JobOrderService {
             pilotName.put(row.getId(), row.getName());
         }
         Map<Long, BigDecimal> chemical = new HashMap<>();
+        Map<Long, BigDecimal> loggedMu = new HashMap<>();
         Map<Long, Long> sortCount = new HashMap<>();
         for (FlightLogStat log : flightLogRepository.findAllByOrderByTakeoffAtDesc(FlightLogStat.class)) {
             Long orderId = log.getJobOrderId();
             chemical.merge(orderId, nvl(log.getChemicalL()), BigDecimal::add);
+            loggedMu.merge(orderId, nvl(log.getAreaMu()), BigDecimal::add);
             sortCount.merge(orderId, 1L, Long::sum);
         }
         // 每张作业单当前仍有效的配药批次（草稿/待复核/已驳回/已锁定），供列表“配药”列直达
@@ -512,7 +528,7 @@ public class JobOrderService {
                 openHandlingDrones.add(row.getId());
             }
         }
-        return new NameBook(plotNo, farmer, bodyNo, model, droneStatus, pilotName, chemical, sortCount,
+        return new NameBook(plotNo, farmer, bodyNo, model, droneStatus, pilotName, chemical, loggedMu, sortCount,
                 openBatch, openHandlingDrones);
     }
 
@@ -563,6 +579,7 @@ public class JobOrderService {
     private record NameBook(Map<Long, String> plotNo, Map<Long, String> farmer, Map<Long, String> bodyNo,
                             Map<Long, String> model, Map<Long, String> droneStatus,
                             Map<Long, String> pilotName, Map<Long, BigDecimal> chemical,
+                            Map<Long, BigDecimal> loggedMu,
                             Map<Long, Long> sortCount, Map<Long, MixingBatch> openBatch,
                             java.util.Set<Long> openHandlingDrones) {
     }

@@ -46,7 +46,10 @@ public final class JobOrderDtos {
     @Data
     public static class DoneReq {
 
-        /** 实际作业亩数，可空：不传则取已登记飞行日志的累计亩数 */
+        /**
+         * 实际作业亩数：仅作一致性核对，不能覆盖飞行日志汇总。
+         * 不传时以后端已落库飞行日志累计亩数收口；传了且与累计不一致则拒绝完成。
+         */
         private BigDecimal actualMu;
     }
 

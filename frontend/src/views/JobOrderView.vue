@@ -25,7 +25,7 @@
         <div class="sb-item"><span>作业中</span><b>{{ count('WORKING') }}</b></div>
         <div class="sb-item"><span>已完成</span><b>{{ count('DONE') }}</b></div>
         <div class="sb-item"><span>计划亩数合计</span><b>{{ plannedTotal.toFixed(1) }}</b></div>
-        <div class="sb-item"><span>实际亩数合计</span><b>{{ actualTotal.toFixed(1) }}</b></div>
+        <div class="sb-item"><span>日志汇总亩数合计</span><b>{{ loggedTotal.toFixed(1) }}</b></div>
         <div class="sb-item"><span>累计用药(L)</span><b>{{ chemicalTotal.toFixed(1) }}</b></div>
       </div>
 
@@ -57,9 +57,9 @@
             <span :style="{ color: statusColor(row.status) }">{{ row.statusName }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="计划 / 实际(亩)" width="130">
+        <el-table-column label="计划 / 日志汇总(亩)" width="150">
           <template #default="{ row }">
-            {{ row.plannedMu }} / <b :style="{ color: '#2e7d32' }">{{ row.actualMu }}</b>
+            {{ row.plannedMu }} / <b :style="{ color: '#2e7d32' }">{{ Number(row.loggedMu || 0).toFixed(2) }}</b>
           </template>
         </el-table-column>
         <el-table-column label="进度" width="130">
@@ -173,6 +173,32 @@
         <el-button type="primary" @click="submitEdit">保存修改</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="finishVisible" title="完成作业单" width="520">
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
+        title="实际作业亩数只认已登记飞行日志的累计值，页面只读展示，不能手工填写或覆盖" />
+      <el-descriptions v-if="finishTarget" :column="1" border size="small">
+        <el-descriptions-item label="作业单号">{{ finishTarget.orderNo }}</el-descriptions-item>
+        <el-descriptions-item label="地块 / 承包户">{{ finishTarget.plotNo }} · {{ finishTarget.farmerName }}</el-descriptions-item>
+        <el-descriptions-item label="计划亩数(亩)">{{ finishTarget.plannedMu }}</el-descriptions-item>
+        <el-descriptions-item label="已登记架次">{{ finishSummary.rows || 0 }} 架次</el-descriptions-item>
+        <el-descriptions-item label="累计飞行时长">{{ finishSummary.totalMinutes || 0 }} 分钟</el-descriptions-item>
+        <el-descriptions-item label="累计消耗药量(L)">{{ Number(finishSummary.chemicalTotal || 0).toFixed(2) }}</el-descriptions-item>
+        <el-descriptions-item label="实际作业亩数(日志汇总)">
+          <b :style="{ color: '#2e7d32' }">{{ Number(finishSummary.totalAreaMu || 0).toFixed(2) }}</b> 亩（只读）
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-alert v-if="!finishBusy && Number(finishSummary.totalAreaMu || 0) <= 0" type="error" :closable="false"
+                show-icon style="margin-top: 12px"
+                title="该作业单还没有登记飞行日志，日志汇总为 0 亩，不能完成；请先到飞行日志页登记架次" />
+      <template #footer>
+        <el-button @click="finishVisible = false" :disabled="finishBusy">取消</el-button>
+        <el-button type="success" :loading="finishBusy"
+                   :disabled="Number(finishSummary.totalAreaMu || 0) <= 0" @click="submitFinish">
+          按日志汇总 {{ Number(finishSummary.totalAreaMu || 0).toFixed(2) }} 亩完成
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -180,7 +206,7 @@
 import { computed, inject, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { droneApi, jobOrderApi, pilotApi, plotApi } from '../api'
+import { droneApi, flightLogApi, jobOrderApi, pilotApi, plotApi } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -195,6 +221,10 @@ const editVisible = ref(false)
 const editTarget = ref(null)
 const editForm = ref({})
 const focusId = ref(null)
+const finishVisible = ref(false)
+const finishTarget = ref(null)
+const finishSummary = ref({})
+const finishBusy = ref(false)
 
 const statuses = [
   { value: 'PENDING', label: '待飞' },
@@ -209,7 +239,7 @@ const form = ref({
 })
 
 const plannedTotal = computed(() => orders.value.reduce((s, r) => s + Number(r.plannedMu || 0), 0))
-const actualTotal = computed(() => orders.value.reduce((s, r) => s + Number(r.actualMu || 0), 0))
+const loggedTotal = computed(() => orders.value.reduce((s, r) => s + Number(r.loggedMu || 0), 0))
 const chemicalTotal = computed(() => orders.value.reduce((s, r) => s + Number(r.chemicalL || 0), 0))
 
 function count(status) {
@@ -295,10 +325,37 @@ async function submitEdit() {
   await load()
 }
 
+/** 打开完成弹窗：只读拉取该作业单的飞行日志汇总，实际亩数不在前端填写 */
 async function finish(row) {
-  await jobOrderApi.finish(row.id)
-  ElMessage.success(row.orderNo + ' 已完成')
-  await load()
+  finishTarget.value = row
+  finishSummary.value = {}
+  finishVisible.value = true
+  try {
+    finishSummary.value = await flightLogApi.summary(row.id)
+  } catch (e) {
+    finishVisible.value = false
+  }
+}
+
+/** 提交完成：不传亩数，后端按已落库日志汇总收口；按钮 loading 防止重复提交二次改统计 */
+async function submitFinish() {
+  if (finishBusy.value) return
+  const row = finishTarget.value
+  if (Number(finishSummary.value.totalAreaMu || 0) <= 0) {
+    ElMessage.warning('飞行日志汇总为 0 亩，不能完成；请先登记架次')
+    return
+  }
+  finishBusy.value = true
+  try {
+    await jobOrderApi.finish(row.id)
+    ElMessage.success(row.orderNo + ' 已完成，实际亩数按飞行日志汇总回填')
+    finishVisible.value = false
+    await load()
+  } catch (e) {
+    // 拦截器已弹出后端的不一致 / 零汇总提示，保持弹窗开着供核对
+  } finally {
+    finishBusy.value = false
+  }
 }
 
 async function cancel(row) {
