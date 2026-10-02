@@ -109,6 +109,8 @@ public final class Views {
             BigDecimal dosePerMu,
             BigDecimal plannedMu,
             BigDecimal actualMu,
+            /** 已落库飞行日志的作业亩数汇总：完成口径与弹窗只读展示都以它为准 */
+            BigDecimal loggedMu,
             LocalDate jobDate,
             String weather,
             String status,

@@ -68,7 +68,8 @@ export const jobOrderApi = {
   create: (data) => http.post('/job-orders', data),
   update: (id, data) => http.put(`/job-orders/${id}`, data),
   takeoff: (id) => http.post(`/job-orders/${id}/takeoff`),
-  finish: (id, actualMu) => http.post(`/job-orders/${id}/finish`, actualMu == null ? {} : { actualMu }),
+  /** 完成不接受前端填写亩数：实际亩数只取已落库飞行日志汇总，由服务端口径收口 */
+  finish: (id) => http.post(`/job-orders/${id}/finish`, {}),
   cancel: (id, reason) => http.post(`/job-orders/${id}/cancel`, reason ? { reason } : {})
 }
 

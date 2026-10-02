@@ -75,7 +75,7 @@ public class JobOrderController {
     @PostMapping("/{id}/finish")
     public ApiResponse<Views.JobOrderView> finish(@PathVariable("id") Long id,
                                                   @RequestBody(required = false) JobOrderDtos.DoneReq req) {
-        return ApiResponse.success("作业完成，亩数已回填", jobOrderService.done(id, req));
+        return ApiResponse.success("作业完成，实际亩数按飞行日志汇总回填", jobOrderService.done(id, req));
     }
 
     /** 待飞 / 作业中 → 已取消 */

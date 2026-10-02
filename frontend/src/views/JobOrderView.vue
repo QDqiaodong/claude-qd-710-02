@@ -3,7 +3,7 @@
     <div class="panel">
       <div class="panel-head">
         <h3>作业单</h3>
-        <span class="panel-sub">待飞 → 作业中 → 已完成 / 已取消，亩数按已登记飞行日志累加</span>
+        <span class="panel-sub">待飞 → 作业中 → 已完成 / 已取消，完成亩数只取已落库飞行日志汇总（只读，不可填写）</span>
         <div class="panel-extra">
           <el-select v-model="filterStatus" clearable placeholder="状态筛选" style="width: 140px" @change="load">
             <el-option v-for="s in statuses" :key="s.value" :label="s.label" :value="s.value" />
@@ -25,6 +25,7 @@
         <div class="sb-item"><span>作业中</span><b>{{ count('WORKING') }}</b></div>
         <div class="sb-item"><span>已完成</span><b>{{ count('DONE') }}</b></div>
         <div class="sb-item"><span>计划亩数合计</span><b>{{ plannedTotal.toFixed(1) }}</b></div>
+        <div class="sb-item"><span>日志汇总合计</span><b>{{ loggedTotal.toFixed(1) }}</b></div>
         <div class="sb-item"><span>实际亩数合计</span><b>{{ actualTotal.toFixed(1) }}</b></div>
         <div class="sb-item"><span>累计用药(L)</span><b>{{ chemicalTotal.toFixed(1) }}</b></div>
       </div>
@@ -57,9 +58,11 @@
             <span :style="{ color: statusColor(row.status) }">{{ row.statusName }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="计划 / 实际(亩)" width="130">
+        <el-table-column label="计划 / 日志汇总(亩)" width="150">
           <template #default="{ row }">
-            {{ row.plannedMu }} / <b :style="{ color: '#2e7d32' }">{{ row.actualMu }}</b>
+            {{ row.plannedMu }} /
+            <b :style="{ color: '#2e7d32' }"
+               title="只读：取该作业单已落库飞行日志的作业亩数汇总，完成时以此为准">{{ row.loggedMu }}</b>
           </template>
         </el-table-column>
         <el-table-column label="进度" width="130">
@@ -173,6 +176,30 @@
         <el-button type="primary" @click="submitEdit">保存修改</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="finishVisible" title="完成作业单" width="520">
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
+        title="实际作业亩数只读取自该作业单已落库飞行日志的汇总，不能手工填写；汇总为 0 时不能完成" />
+      <el-descriptions v-if="finishTarget" :column="1" border size="small">
+        <el-descriptions-item label="作业单号">{{ finishTarget.orderNo }}</el-descriptions-item>
+        <el-descriptions-item label="地块 / 承包户">{{ finishTarget.plotNo }} · {{ finishTarget.farmerName }}</el-descriptions-item>
+        <el-descriptions-item label="飞行日志架次">{{ finishTarget.sortCount }} 架</el-descriptions-item>
+        <el-descriptions-item label="日志汇总作业亩数（只读）">
+          <b :style="{ color: '#2e7d32' }">{{ finishTarget.loggedMu }} 亩</b>
+        </el-descriptions-item>
+        <el-descriptions-item label="日志汇总用药量（只读）">{{ finishTarget.chemicalL }} L</el-descriptions-item>
+        <el-descriptions-item label="计划亩数">{{ finishTarget.plannedMu }} 亩</el-descriptions-item>
+      </el-descriptions>
+      <el-alert v-if="finishTarget && Number(finishTarget.loggedMu || 0) <= 0" type="error" :closable="false"
+        show-icon style="margin-top: 12px"
+        title="飞行日志汇总亩数为 0（没有任何有效架次）：请先到飞行日志页登记架次，本作业单暂不能完成" />
+      <template #footer>
+        <el-button @click="finishVisible = false">取消</el-button>
+        <el-button type="success" :loading="finishLoading"
+                   :disabled="!finishTarget || Number(finishTarget.loggedMu || 0) <= 0"
+                   @click="submitFinish">按日志汇总 {{ finishTarget ? finishTarget.loggedMu : '' }} 亩完成</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -195,6 +222,9 @@ const editVisible = ref(false)
 const editTarget = ref(null)
 const editForm = ref({})
 const focusId = ref(null)
+const finishVisible = ref(false)
+const finishTarget = ref(null)
+const finishLoading = ref(false)
 
 const statuses = [
   { value: 'PENDING', label: '待飞' },
@@ -210,6 +240,7 @@ const form = ref({
 
 const plannedTotal = computed(() => orders.value.reduce((s, r) => s + Number(r.plannedMu || 0), 0))
 const actualTotal = computed(() => orders.value.reduce((s, r) => s + Number(r.actualMu || 0), 0))
+const loggedTotal = computed(() => orders.value.reduce((s, r) => s + Number(r.loggedMu || 0), 0))
 const chemicalTotal = computed(() => orders.value.reduce((s, r) => s + Number(r.chemicalL || 0), 0))
 
 function count(status) {
@@ -295,10 +326,28 @@ async function submitEdit() {
   await load()
 }
 
-async function finish(row) {
-  await jobOrderApi.finish(row.id)
-  ElMessage.success(row.orderNo + ' 已完成')
-  await load()
+/** 完成：弹窗只读展示日志汇总，确认后不带亩数提交，服务端以已落库汇总收口 */
+function finish(row) {
+  finishTarget.value = row
+  finishVisible.value = true
+}
+
+async function submitFinish() {
+  if (!finishTarget.value) return
+  if (Number(finishTarget.value.loggedMu || 0) <= 0) {
+    ElMessage.warning('飞行日志汇总亩数为 0，先登记架次再完成')
+    return
+  }
+  finishLoading.value = true
+  try {
+    await jobOrderApi.finish(finishTarget.value.id)
+    ElMessage.success(finishTarget.value.orderNo + ' 已按飞行日志汇总 '
+      + finishTarget.value.loggedMu + ' 亩完成')
+    finishVisible.value = false
+    await load()
+  } finally {
+    finishLoading.value = false
+  }
 }
 
 async function cancel(row) {
